@@ -113,13 +113,7 @@ export default function App() {
       };
     } else {
       url = '/api/card-pay';
-      payload = { 
-        amount,
-        number: card.number.replace(/\s/g, ''),
-        cvv: card.cvv,
-        expiry: card.expiry,
-        email: email
-      };
+      payload = { amount, ...card };
     }
 
     try {
@@ -159,7 +153,7 @@ export default function App() {
         onSubmit={handleSubmit}
         className="bg-white p-8 rounded-lg shadow-md w-full max-w-md space-y-6"
       >
-        <h1 className="text-2xl font-bold mb-4 text-center">Tiptide</h1>
+        <h1 className="text-2xl font-bold mb-4 text-center">Flutterwave Payment</h1>
         
         <div>
           <label className="block mb-1 font-medium">Payment Method</label>
