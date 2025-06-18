@@ -12,7 +12,6 @@ app.use(express.json());
 const FLW_BASE = 'https://api.flutterwave.com/v3/charges';
 const { SECRET_KEY, ENCRYPTION_KEY } = process.env;
 
-// Root route
 app.get('/', (req, res) => {
   res.json({ 
     status: 'success',
@@ -24,8 +23,6 @@ app.get('/', (req, res) => {
     }
   });
 });
-
-// Health check endpoint
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'success',
@@ -48,17 +45,16 @@ const encrypt = (text) => {
   };
 };
 
-// Format phone number to international format
 const formatPhoneNumber = (phone) => {
-  // Remove any non-digit characters
+
   let cleaned = phone.replace(/\D/g, '');
   
-  // If number starts with 0, replace with 254
+  
   if (cleaned.startsWith('0')) {
     cleaned = '254' + cleaned.substring(1);
   }
   
-  // If number doesn't start with 254, add it
+  
   if (!cleaned.startsWith('254')) {
     cleaned = '254' + cleaned;
   }
@@ -66,7 +62,7 @@ const formatPhoneNumber = (phone) => {
   return cleaned;
 };
 
-// Validation helpers
+
 const validatePhoneNumber = (phone) => {
   const phoneRegex = /^(\+254|0)[17]\d{8}$/;
   return phoneRegex.test(phone);
@@ -90,11 +86,11 @@ const validateExpiry = (expiry) => {
   );
 };
 
-// Mobile Money (M-Pesa/Airtel)
+
 app.post('/api/pay', async (req, res) => {
   const { amount, phone, network, email } = req.body;
   
-  // Validation
+  
   if (!amount || !phone || !network || !email) {
     return res.status(400).json({ success: false, message: 'Missing required fields.' });
   }
@@ -111,7 +107,7 @@ app.post('/api/pay', async (req, res) => {
     return res.status(400).json({ success: false, message: 'Amount must be greater than 0.' });
   }
 
-  // Format phone number to international format
+
   const formattedPhone = formatPhoneNumber(phone);
   let type = network === 'mpesa' ? 'mpesa' : 'airtel';
   
@@ -123,7 +119,7 @@ app.post('/api/pay', async (req, res) => {
     console.log('Network:', type);
     console.log('Email:', email);
     
-    // Create the payment payload according to Flutterwave's API
+  
     const paymentPayload = {
       tx_ref: `tx-${Date.now()}`,
       amount: parseFloat(amount),
@@ -141,7 +137,6 @@ app.post('/api/pay', async (req, res) => {
       }
     };
 
-    // Log the complete request details
     console.log('\n=== Flutterwave Request ===');
     console.log('URL:', `${FLW_BASE}?type=${type}`);
     console.log('Headers:', {
@@ -161,7 +156,6 @@ app.post('/api/pay', async (req, res) => {
       }
     );
 
-    // Log the complete response
     console.log('\n=== Flutterwave Response ===');
     console.log('Status:', response.status);
     console.log('Data:', JSON.stringify(response.data, null, 2));
@@ -198,7 +192,7 @@ app.post('/api/pay', async (req, res) => {
 app.post('/api/card-pay', async (req, res) => {
   const { amount, number, cvv, expiry, email } = req.body;
 
-  // Validation
+
   if (!amount || !number || !cvv || !expiry || !email) {
     return res.status(400).json({ success: false, message: 'Missing required fields.' });
   }
@@ -272,12 +266,11 @@ app.post('/api/card-pay', async (req, res) => {
   }
 });
 
-// M-Pesa Payment Route
 app.post('/api/mpesa-pay', async (req, res) => {
   const { amount, phone_number, email, customer } = req.body;
   
   try {
-    // Create the payment payload
+
     const paymentPayload = {
       tx_ref: `tx-${Date.now()}`,
       amount: parseFloat(amount),
@@ -293,7 +286,7 @@ app.post('/api/mpesa-pay', async (req, res) => {
       }
     };
 
-    // Make the request to Flutterwave
+   
     const response = await axios.post(
       `${FLW_BASE}?type=mpesa`,
       paymentPayload,
@@ -329,7 +322,7 @@ app.post('/api/mpesa-pay', async (req, res) => {
   }
 });
 
-// Error handling middleware
+
 app.use((err, req, res, next) => {
   console.error('Server error:', err);
   res.status(500).json({

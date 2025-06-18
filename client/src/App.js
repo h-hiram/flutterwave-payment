@@ -6,7 +6,7 @@ const paymentMethods = [
   { label: 'Card', value: 'card' },
 ];
 
-// Validation helpers
+
 const formatPhoneNumber = (value) => {
   const cleaned = value.replace(/\D/g, '');
   if (cleaned.length <= 10) {
