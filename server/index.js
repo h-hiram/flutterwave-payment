@@ -36,36 +36,16 @@ app.get('/health', (req, res) => {
 
 // Helper: Encrypt payload for card payments
 const encrypt = (text) => {
-  try {
-    const algorithm = 'des-ede3-cbc'; // 3DES encryption
-    // Log the encryption key details (safely)
-    console.log('\n=== Encryption Key Details ===');
-    console.log('Key exists:', !!ENCRYPTION_KEY);
-    console.log('Key length:', ENCRYPTION_KEY ? ENCRYPTION_KEY.length : 0);
-    
-    // Ensure the key is present
-    let key = ENCRYPTION_KEY;
-    if (!key || key.length !== 24) {
-      throw new Error(`Invalid encryption key length: ${key ? key.length : 0} (expected 24)`);
-    }
-    
-    // Use the key directly for 3DES
-    const keyBuffer = Buffer.from(key);
-    const iv = Buffer.alloc(8, 0); // Use zero-filled IV as per Flutterwave docs
-    
-    const cipher = crypto.createCipheriv(algorithm, keyBuffer, iv);
-    cipher.setAutoPadding(true);
-    let encrypted = cipher.update(text, 'utf8', 'base64');
-    encrypted += cipher.final('base64');
-    
-    return {
-      encrypted,
-      iv: iv.toString('base64')
-    };
-  } catch (error) {
-    console.error('Encryption error:', error.message);
-    throw new Error(`Failed to encrypt card details: ${error.message}`);
-  }
+  const algorithm = 'aes-256-cbc';
+  const key = Buffer.from(ENCRYPTION_KEY, 'hex');
+  const iv = crypto.randomBytes(16);
+  const cipher = crypto.createCipheriv(algorithm, key, iv);
+  let encrypted = cipher.update(text, 'utf8', 'hex');
+  encrypted += cipher.final('hex');
+  return {
+    encrypted,
+    iv: iv.toString('hex')
+  };
 };
 
 // Format phone number to international format
@@ -216,19 +196,10 @@ app.post('/api/pay', async (req, res) => {
 
 // Card Payment
 app.post('/api/card-pay', async (req, res) => {
-  const { amount, number, cvv, expiry, email, fullname } = req.body;
-
-  // Log the incoming request
-  console.log('\n=== Card Payment Request ===');
-  console.log('Amount:', amount);
-  console.log('Card Number Length:', number ? number.length : 0);
-  console.log('CVV Length:', cvv ? cvv.length : 0);
-  console.log('Expiry:', expiry);
-  console.log('Email:', email);
-  console.log('Fullname:', fullname);
+  const { amount, number, cvv, expiry, email } = req.body;
 
   // Validation
-  if (!amount || !number || !cvv || !expiry || !email || !fullname) {
+  if (!amount || !number || !cvv || !expiry || !email) {
     return res.status(400).json({ success: false, message: 'Missing required fields.' });
   }
 
@@ -254,30 +225,22 @@ app.post('/api/card-pay', async (req, res) => {
 
   try {
     const encryptedCard = encrypt(number);
-    console.log('\n=== Flutterwave Request ===');
-    console.log('Card encrypted successfully');
-    
-    const [expiryMonth, expiryYear] = expiry.split('/');
-    const tx_ref = `tx-${Date.now()}`;
-    
-    // Step 1: Send POST to charges endpoint
-    const chargeResponse = await axios.post(
+    const response = await axios.post(
       `${FLW_BASE}?type=card`,
       {
-        tx_ref,
-        amount: parseFloat(amount),
+        tx_ref: `tx-${Date.now()}`,
+        amount,
         currency: 'KES',
+        redirect_url: '',
         payment_type: 'card',
         card_number: encryptedCard.encrypted,
         cvv,
-        expiry_month: expiryMonth,
-        expiry_year: expiryYear,
+        expiry,
         email,
-        fullname,
-        encryption_key: ENCRYPTION_KEY,
+        encryption_key: encryptedCard.iv,
         customer: {
-          email,
-          name: fullname
+          email: email,
+          name: 'Customer'
         }
       },
       {
@@ -285,64 +248,27 @@ app.post('/api/card-pay', async (req, res) => {
           Authorization: `Bearer ${SECRET_KEY}`,
           'Content-Type': 'application/json'
         },
-        timeout: 30000
+        timeout: 10000
       }
     );
 
-    console.log('\n=== Flutterwave Charge Response ===');
-    console.log('Status:', chargeResponse.status);
-    console.log('Data:', JSON.stringify(chargeResponse.data, null, 2));
-
-    if (chargeResponse.data.status === 'success') {
-      // Step 2: Verify the transaction
-      const transactionId = chargeResponse.data.data.id;
-      console.log('\n=== Verifying Transaction ===');
-      console.log('Transaction ID:', transactionId);
-
-      const verifyResponse = await axios.get(
-        `https://api.flutterwave.com/v3/transactions/${transactionId}/verify`,
-        {
-          headers: {
-            Authorization: `Bearer ${SECRET_KEY}`,
-            'Content-Type': 'application/json'
-          }
-        }
-      );
-
-      console.log('\n=== Verification Response ===');
-      console.log('Status:', verifyResponse.status);
-      console.log('Data:', JSON.stringify(verifyResponse.data, null, 2));
-
-      if (verifyResponse.data.status === 'success' && verifyResponse.data.data.status === 'successful') {
-        console.log(`Payment completed successfully for ${email} - Amount: ${amount}`);
-        res.json({ 
-          success: true, 
-          data: verifyResponse.data,
-          message: 'Payment successful!'
-        });
-      } else {
-        console.error(`Payment verification failed for ${email}: ${verifyResponse.data.message}`);
-        res.json({ 
-          success: false, 
-          message: verifyResponse.data.message || 'Payment verification failed. Please try again.' 
-        });
-      }
+    if (response.data.status === 'success') {
+      console.log(`Card payment initiated successfully for ${email} - Amount: ${amount}`);
+      res.json({ success: true, data: response.data });
     } else {
-      console.error(`Card payment failed for ${email}: ${chargeResponse.data.message}`);
-      res.json({ 
-        success: false, 
-        message: chargeResponse.data.message || 'Payment failed. Please try again.' 
-      });
+      console.error(`Card payment failed for ${email}: ${response.data.message}`);
+      res.json({ success: false, message: response.data.message });
     }
   } catch (err) {
     console.error('Card payment error:', err.message);
-    if (err.response?.data) {
-      console.error('Error details:', JSON.stringify(err.response.data, null, 2));
+    if (err.code === 'ECONNABORTED') {
+      res.status(504).json({ success: false, message: 'Request timeout. Please try again.' });
+    } else {
+      res.status(500).json({ 
+        success: false, 
+        message: err.response?.data?.message || 'Payment failed. Please try again.' 
+      });
     }
-    res.status(500).json({ 
-      success: false, 
-      message: err.response?.data?.message || 'Payment failed. Please try again.' 
-    });
   }
 });
 
@@ -412,7 +338,8 @@ app.use((err, req, res, next) => {
     error: process.env.NODE_ENV === 'development' ? err.message : undefined
   });
 });
-// 404 Not Found handler
+
+// 404 handler
 app.use((req, res) => {
   res.status(404).json({
     status: 'error',
