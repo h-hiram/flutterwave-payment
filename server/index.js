@@ -1,0 +1,429 @@
+const express = require('express');
+const axios = require('axios');
+const cors = require('cors');
+const dotenv = require('dotenv');
+const crypto = require('crypto');
+dotenv.config();
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+const FLW_BASE = 'https://api.flutterwave.com/v3/charges';
+const { SECRET_KEY, ENCRYPTION_KEY } = process.env;
+
+// Root route
+app.get('/', (req, res) => {
+  res.json({ 
+    status: 'success',
+    message: 'Flutterwave Payment API is running',
+    mode: 'test',
+    endpoints: {
+      mobile_money: '/api/pay',
+      card_payment: '/api/card-pay'
+    }
+  });
+});
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'success',
+    message: 'Server is healthy',
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Helper: Encrypt payload for card payments
+const encrypt = (text) => {
+  try {
+    const algorithm = 'des-ede3-cbc'; // 3DES encryption
+    // Log the encryption key details (safely)
+    console.log('\n=== Encryption Key Details ===');
+    console.log('Key exists:', !!ENCRYPTION_KEY);
+    console.log('Key length:', ENCRYPTION_KEY ? ENCRYPTION_KEY.length : 0);
+    
+    // Ensure the key is present
+    let key = ENCRYPTION_KEY;
+    if (!key || key.length !== 24) {
+      throw new Error(`Invalid encryption key length: ${key ? key.length : 0} (expected 24)`);
+    }
+    
+    // Use the key directly for 3DES
+    const keyBuffer = Buffer.from(key);
+    const iv = Buffer.alloc(8, 0); // Use zero-filled IV as per Flutterwave docs
+    
+    const cipher = crypto.createCipheriv(algorithm, keyBuffer, iv);
+    cipher.setAutoPadding(true);
+    let encrypted = cipher.update(text, 'utf8', 'base64');
+    encrypted += cipher.final('base64');
+    
+    return {
+      encrypted,
+      iv: iv.toString('base64')
+    };
+  } catch (error) {
+    console.error('Encryption error:', error.message);
+    throw new Error(`Failed to encrypt card details: ${error.message}`);
+  }
+};
+
+// Format phone number to international format
+const formatPhoneNumber = (phone) => {
+  // Remove any non-digit characters
+  let cleaned = phone.replace(/\D/g, '');
+  
+  // If number starts with 0, replace with 254
+  if (cleaned.startsWith('0')) {
+    cleaned = '254' + cleaned.substring(1);
+  }
+  
+  // If number doesn't start with 254, add it
+  if (!cleaned.startsWith('254')) {
+    cleaned = '254' + cleaned;
+  }
+  
+  return cleaned;
+};
+
+// Validation helpers
+const validatePhoneNumber = (phone) => {
+  const phoneRegex = /^(\+254|0)[17]\d{8}$/;
+  return phoneRegex.test(phone);
+};
+
+const validateCardNumber = (number) => {
+  return /^\d{16}$/.test(number.replace(/\s/g, ''));
+};
+
+const validateExpiry = (expiry) => {
+  const [month, year] = expiry.split('/');
+  if (!month || !year) return false;
+  const currentYear = new Date().getFullYear() % 100;
+  const currentMonth = new Date().getMonth() + 1;
+  return (
+    /^\d{2}$/.test(month) &&
+    /^\d{2}$/.test(year) &&
+    parseInt(month) >= 1 &&
+    parseInt(month) <= 12 &&
+    (parseInt(year) > currentYear || (parseInt(year) === currentYear && parseInt(month) >= currentMonth))
+  );
+};
+
+// Mobile Money (M-Pesa/Airtel)
+app.post('/api/pay', async (req, res) => {
+  const { amount, phone, network, email } = req.body;
+  
+  // Validation
+  if (!amount || !phone || !network || !email) {
+    return res.status(400).json({ success: false, message: 'Missing required fields.' });
+  }
+  
+  if (!validatePhoneNumber(phone)) {
+    return res.status(400).json({ success: false, message: 'Invalid phone number format.' });
+  }
+
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return res.status(400).json({ success: false, message: 'Invalid email address.' });
+  }
+
+  if (amount < 1) {
+    return res.status(400).json({ success: false, message: 'Amount must be greater than 0.' });
+  }
+
+  // Format phone number to international format
+  const formattedPhone = formatPhoneNumber(phone);
+  let type = network === 'mpesa' ? 'mpesa' : 'airtel';
+  
+  try {
+    console.log('\n=== Payment Request Details ===');
+    console.log('Phone (original):', phone);
+    console.log('Phone (formatted):', formattedPhone);
+    console.log('Amount:', amount);
+    console.log('Network:', type);
+    console.log('Email:', email);
+    
+    // Create the payment payload according to Flutterwave's API
+    const paymentPayload = {
+      tx_ref: `tx-${Date.now()}`,
+      amount: parseFloat(amount),
+      currency: 'KES',
+      email: email,
+      phone_number: formattedPhone,
+      customer: {
+        email,
+        phone_number: formattedPhone,
+        name: 'Customer'
+      },
+      customizations: {
+        title: `${type.toUpperCase()} Payment`,
+        description: `Complete your payment using ${type.toUpperCase()}`
+      }
+    };
+
+    // Log the complete request details
+    console.log('\n=== Flutterwave Request ===');
+    console.log('URL:', `${FLW_BASE}?type=${type}`);
+    console.log('Headers:', {
+      'Authorization': `Bearer ${SECRET_KEY.substring(0, 10)}...`,
+      'Content-Type': 'application/json'
+    });
+    console.log('Payload:', JSON.stringify(paymentPayload, null, 2));
+
+    const response = await axios.post(
+      `${FLW_BASE}?type=${type}`,
+      paymentPayload,
+      {
+        headers: {
+          Authorization: `Bearer ${SECRET_KEY}`,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    // Log the complete response
+    console.log('\n=== Flutterwave Response ===');
+    console.log('Status:', response.status);
+    console.log('Data:', JSON.stringify(response.data, null, 2));
+
+    if (response.data.status === 'success') {
+      res.json({ 
+        success: true, 
+        data: response.data,
+        message: `Please check your phone for the ${type.toUpperCase()} prompt to complete the payment.`
+      });
+    } else {
+      console.error('\n=== Payment Failed ===');
+      console.error('Response:', JSON.stringify(response.data, null, 2));
+      res.json({ 
+        success: false, 
+        message: response.data.message || 'Payment failed. Please try again.' 
+      });
+    }
+  } catch (err) {
+    console.error('\n=== Payment Error ===');
+    console.error('Error message:', err.message);
+    if (err.response) {
+      console.error('Response status:', err.response.status);
+      console.error('Response data:', JSON.stringify(err.response.data, null, 2));
+    }
+    res.status(500).json({ 
+      success: false, 
+      message: err.response?.data?.message || 'Payment failed. Please try again.' 
+    });
+  }
+});
+
+// Card Payment
+app.post('/api/card-pay', async (req, res) => {
+  const { amount, number, cvv, expiry, email, fullname } = req.body;
+
+  // Log the incoming request
+  console.log('\n=== Card Payment Request ===');
+  console.log('Amount:', amount);
+  console.log('Card Number Length:', number ? number.length : 0);
+  console.log('CVV Length:', cvv ? cvv.length : 0);
+  console.log('Expiry:', expiry);
+  console.log('Email:', email);
+  console.log('Fullname:', fullname);
+
+  // Validation
+  if (!amount || !number || !cvv || !expiry || !email || !fullname) {
+    return res.status(400).json({ success: false, message: 'Missing required fields.' });
+  }
+
+  if (!validateCardNumber(number)) {
+    return res.status(400).json({ success: false, message: 'Invalid card number.' });
+  }
+
+  if (!validateExpiry(expiry)) {
+    return res.status(400).json({ success: false, message: 'Invalid expiry date.' });
+  }
+
+  if (!/^\d{3,4}$/.test(cvv)) {
+    return res.status(400).json({ success: false, message: 'Invalid CVV.' });
+  }
+
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return res.status(400).json({ success: false, message: 'Invalid email address.' });
+  }
+
+  if (amount < 1) {
+    return res.status(400).json({ success: false, message: 'Amount must be greater than 0.' });
+  }
+
+  try {
+    const encryptedCard = encrypt(number);
+    console.log('\n=== Flutterwave Request ===');
+    console.log('Card encrypted successfully');
+    
+    const [expiryMonth, expiryYear] = expiry.split('/');
+    const tx_ref = `tx-${Date.now()}`;
+    
+    // Step 1: Send POST to charges endpoint
+    const chargeResponse = await axios.post(
+      `${FLW_BASE}?type=card`,
+      {
+        tx_ref,
+        amount: parseFloat(amount),
+        currency: 'KES',
+        payment_type: 'card',
+        card_number: encryptedCard.encrypted,
+        cvv,
+        expiry_month: expiryMonth,
+        expiry_year: expiryYear,
+        email,
+        fullname,
+        encryption_key: ENCRYPTION_KEY,
+        customer: {
+          email,
+          name: fullname
+        }
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${SECRET_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        timeout: 30000
+      }
+    );
+
+    console.log('\n=== Flutterwave Charge Response ===');
+    console.log('Status:', chargeResponse.status);
+    console.log('Data:', JSON.stringify(chargeResponse.data, null, 2));
+
+    if (chargeResponse.data.status === 'success') {
+      // Step 2: Verify the transaction
+      const transactionId = chargeResponse.data.data.id;
+      console.log('\n=== Verifying Transaction ===');
+      console.log('Transaction ID:', transactionId);
+
+      const verifyResponse = await axios.get(
+        `https://api.flutterwave.com/v3/transactions/${transactionId}/verify`,
+        {
+          headers: {
+            Authorization: `Bearer ${SECRET_KEY}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+
+      console.log('\n=== Verification Response ===');
+      console.log('Status:', verifyResponse.status);
+      console.log('Data:', JSON.stringify(verifyResponse.data, null, 2));
+
+      if (verifyResponse.data.status === 'success' && verifyResponse.data.data.status === 'successful') {
+        console.log(`Payment completed successfully for ${email} - Amount: ${amount}`);
+        res.json({ 
+          success: true, 
+          data: verifyResponse.data,
+          message: 'Payment successful!'
+        });
+      } else {
+        console.error(`Payment verification failed for ${email}: ${verifyResponse.data.message}`);
+        res.json({ 
+          success: false, 
+          message: verifyResponse.data.message || 'Payment verification failed. Please try again.' 
+        });
+      }
+    } else {
+      console.error(`Card payment failed for ${email}: ${chargeResponse.data.message}`);
+      res.json({ 
+        success: false, 
+        message: chargeResponse.data.message || 'Payment failed. Please try again.' 
+      });
+    }
+  } catch (err) {
+    console.error('Card payment error:', err.message);
+    if (err.response?.data) {
+      console.error('Error details:', JSON.stringify(err.response.data, null, 2));
+    }
+    res.status(500).json({ 
+      success: false, 
+      message: err.response?.data?.message || 'Payment failed. Please try again.' 
+    });
+  }
+});
+
+// M-Pesa Payment Route
+app.post('/api/mpesa-pay', async (req, res) => {
+  const { amount, phone_number, email, customer } = req.body;
+  
+  try {
+    // Create the payment payload
+    const paymentPayload = {
+      tx_ref: `tx-${Date.now()}`,
+      amount: parseFloat(amount),
+      currency: 'KES',
+      payment_type: 'mpesa',
+      email: email,
+      phone_number: phone_number,
+      customer: customer,
+      customizations: {
+        title: 'M-Pesa Payment',
+        description: 'Complete your payment using M-Pesa',
+        logo: 'https://flutterwave.com/images/logo-colored.svg'
+      }
+    };
+
+    // Make the request to Flutterwave
+    const response = await axios.post(
+      `${FLW_BASE}?type=mpesa`,
+      paymentPayload,
+      {
+        headers: {
+          Authorization: `Bearer ${SECRET_KEY}`,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    if (response.data.status === 'success') {
+      res.json({ 
+        success: true, 
+        data: response.data,
+        message: 'Please check your phone for the M-Pesa prompt to complete the payment.'
+      });
+    } else {
+      res.json({ 
+        success: false, 
+        message: response.data.message || 'Failed to initiate payment. Please try again.' 
+      });
+    }
+  } catch (err) {
+    console.error('M-Pesa payment error:', err.message);
+    if (err.response?.data) {
+      console.error('Error details:', JSON.stringify(err.response.data, null, 2));
+    }
+    res.status(500).json({ 
+      success: false, 
+      message: err.response?.data?.message || 'Payment failed. Please try again.' 
+    });
+  }
+});
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error('Server error:', err);
+  res.status(500).json({
+    status: 'error',
+    message: 'Internal server error',
+    error: process.env.NODE_ENV === 'development' ? err.message : undefined
+  });
+});
+// 404 Not Found handler
+app.use((req, res) => {
+  res.status(404).json({
+    status: 'error',
+    message: 'Endpoint not found',
+    path: req.path
+  });
+});
+
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+  console.log(`Health check: http://localhost:${PORT}/health`);
+  console.log(`API documentation: http://localhost:${PORT}/`);
+}); 
